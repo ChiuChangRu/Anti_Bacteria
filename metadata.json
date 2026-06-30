@@ -1,0 +1,6 @@
+{
+  "name": "Anti-Encrustation Testing & Regulatory Suite",
+  "description": "An interactive suite for designing in vitro catheter anti-encrustation protocols, generating Taiwanese lab outsourcing letters, and formulating TFDA/FDA regulatory strategies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
