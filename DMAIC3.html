@@ -218,7 +218,8 @@ label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:var(-
     </div>
   </div>
   <div class="sim-banner">
-    <b>模擬模式（API 轉換前）</b>：AI 追問與辨識由規則引擎模擬，510k／MAUDE／ISO 為示範資料。每個結論皆標示信心度與證據來源；資訊不足時明確標記「待調查」而非臆測。正式使用需由 QA/RA 審閱。
+    <span id="ai-mode-badge" class="pill pill-amber">🟡 模擬模式</span>
+    AI 追問選項與因子選擇採規則引擎（保證可追溯）；<b>連線模式</b>下，調查摘要、根因佐證與報告結論改由後端模型產生工程級推理。510k／MAUDE／ISO 為示範資料。每個結論皆標示信心度與證據來源；資訊不足時明確標記「待釐清」而非臆測。正式使用需由 QA/RA 審閱。
   </div>
 
   <!-- S1 問題定義 -->
@@ -408,6 +409,33 @@ const NAV = [
 ];
 let maxStage = 1, curStage = 1;
 let fishboneSvgMarkup = '';
+
+/* ── AI 後端連線層（連線 → 工程級推理；失敗 → 規則引擎 fallback）── */
+const AI = { online:false, base:'/api/dmaic' };
+async function pingAI(){
+  // file:// 直接開啟時無後端可連，略過 fetch 以免 CORS 雜訊；僅在 http(s) 下偵測
+  if(location.protocol!=='http:'&&location.protocol!=='https:'){ AI.online=false; }
+  else{
+    try{
+      const r=await fetch(AI.base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:'ping'})});
+      AI.online = r.ok;
+    }catch(e){ AI.online=false; }
+  }
+  const b=document.getElementById('ai-mode-badge');
+  if(b){ b.textContent = AI.online?'🟢 AI 連線模式':'🟡 模擬模式'; b.className='pill '+(AI.online?'pill-green':'pill-amber'); }
+}
+async function aiCall(task, context, opts){
+  opts=opts||{};
+  if(!AI.online) return null;
+  try{
+    const r=await fetch(AI.base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task,context})});
+    if(!r.ok) return null;
+    const j=await r.json();
+    if(!j.success||!j.text) return null;
+    if(opts.json){ try{ return JSON.parse(j.text); }catch(e){ const m=j.text.match(/\[[\s\S]*\]|\{[\s\S]*\}/); return m?JSON.parse(m[0]):null; } }
+    return j.text;
+  }catch(e){ return null; }
+}
 
 /* ── 導覽 ── */
 function buildNav(){
@@ -619,20 +647,32 @@ function answerInv(optIdx){
   invIdx++;
   setTimeout(askNext,300);
 }
-function endInvestigation(){
+async function endInvestigation(){
   const hints=STATE.investigation.factorHints;
   const narrowed=Object.entries(hints).map(([f,hs])=>`<b>${f}</b>：${hs.join('、')}`);
   const positives=STATE.investigation.findings.filter(fd=>!fd.opt);
   const dataGap=STATE.questionnaire.flags.dataGap;
-  STATE.investigation.summary =
+  // 規則版摘要（fallback，永遠先算好）
+  const ruleSummary =
     (Object.keys(hints).length? '本次調查收斂出下列因子方向：'+Object.keys(hints).join('、')+'。' : '調查未取得指向性線索。')
     + (positives.length? ' 另有 '+positives.length+' 項正面/中性發現（見證據彙整）。':'')
     + (dataGap?' 問卷顯示缺乏量化數據，測量方法與資料缺口列為調查重點。':'');
-  let html='<div style="margin-bottom:8px">'+esc(STATE.investigation.summary)+'</div>';
-  if(narrowed.length) html+='<ul style="padding-left:18px;font-size:12.5px">'+narrowed.map(n=>'<li>'+n+'</li>').join('')+'</ul>';
-  document.getElementById('inv-summary').innerHTML=html;
-  document.getElementById('inv-summary-box').style.display='block';
+  STATE.investigation.summary=ruleSummary;
+  const box=document.getElementById('inv-summary-box'), out=document.getElementById('inv-summary');
+  box.style.display='block';
+  const renderSummary=(src)=>{
+    let html='<div style="margin-bottom:8px">'+esc(STATE.investigation.summary)+'</div>';
+    if(narrowed.length) html+='<ul style="padding-left:18px;font-size:12.5px">'+narrowed.map(n=>'<li>'+n+'</li>').join('')+'</ul>';
+    html+='<div style="font-size:11px;color:var(--muted);margin-top:6px">摘要來源：'+src+'</div>';
+    out.innerHTML=html;
+  };
   document.getElementById('s3-next').disabled=false;
+  if(AI.online){
+    out.innerHTML='<span class="spinner" style="border-color:rgba(24,95,165,.3);border-top-color:var(--blue)"></span> AI 工程彙整中…';
+    const llm=await aiCall('summary',{device:STATE.device,failure_mode:STATE.device.failureMode,problem:STATE.problem,questionnaire:STATE.questionnaire.answers,findings:STATE.investigation.findings});
+    if(llm){ STATE.investigation.summary=llm.trim(); renderSummary('AI 模型（連線）'); return; }
+  }
+  renderSummary('規則引擎（模擬）');
 }
 
 /* ═══════════════ 階段 4：證據彙整 ═══════════════ */
@@ -801,6 +841,17 @@ async function submitStage5(){
   drawFishbone();
   document.getElementById('rc-card-wrap').classList.remove('hidden');
   document.getElementById('rc-card-wrap').scrollIntoView({behavior:'smooth'});
+  enrichRootCauses();
+}
+/* 連線模式：以模型補上每個根因的工程佐證與關鍵缺口（僅新增敘述，不改動結構/信心度）*/
+async function enrichRootCauses(){
+  if(!AI.online||!STATE.rootCauses.length) return;
+  const payload=STATE.rootCauses.map(rc=>({id:rc.id,factor:rc.factor,statement:rc.statement,support:rc.support,missing:rc.missing,confidence:rc.confidence.score,pending:!!rc.pending}));
+  const arr=await aiCall('rootcause',{device:STATE.device,problem:STATE.problem,root_causes:payload},{json:true});
+  if(!Array.isArray(arr)) return;
+  const byId={}; arr.forEach(a=>{if(a&&a.id)byId[a.id]=a;});
+  STATE.rootCauses.forEach(rc=>{const a=byId[rc.id];if(a){rc.aiRationale=a.rationale||'';rc.aiGap=a.gap||'';}});
+  renderRootCauses();
 }
 /* 根因：由每個有實質勾選的因子生成，帶信心度、支持/缺口證據、建議驗證 */
 const VERIF_MAP={
@@ -859,6 +910,7 @@ function renderRootCauses(){
         <div><span class="k">假設</span><div>${esc(rc.hypothesis)}</div></div>
         <div><span class="k">建議驗證</span><div>${esc(rc.recommend.method)} <span class="tool-tag">${rc.recommend.tool}</span></div></div>
       </div>
+      ${rc.aiRationale?`<div style="margin-top:8px;padding:8px 10px;background:var(--blue-bg);border-radius:6px;font-size:12.5px"><b style="color:var(--blue-bd)">AI 工程佐證：</b>${esc(rc.aiRationale)}${rc.aiGap&&rc.aiGap!=='—'?`<br><span style="color:var(--red)">關鍵缺口：${esc(rc.aiGap)}</span>`:''}</div>`:''}
     </div>`;
   }).join('');
 }
@@ -1039,7 +1091,7 @@ function renderVerifications(){
 function submitStage7(){buildReport();goStage(8);}
 
 /* ═══════════════ 階段 8：最終報告（可追溯）═══════════════ */
-function buildReport(){
+async function buildReport(){
   const d=STATE.device,now=new Date().toLocaleDateString('zh-TW');
   const a=STATE.questionnaire.answers;
   const highRC=STATE.rootCauses.filter(r=>r.fmea.rpn>=200);
@@ -1088,7 +1140,7 @@ function buildReport(){
   });
   html+=`
     <h3>六、結論與追溯性聲明</h3>
-    ${(()=>{
+    <div id="report-conclusion">${(()=>{
       const confirmed=STATE.rootCauses.filter(r=>!r.pending).sort((x,y)=>y.fmea.rpn-x.fmea.rpn);
       const pending=STATE.rootCauses.filter(r=>r.pending);
       const top=confirmed.slice(0,2).map(r=>esc(r.statement));
@@ -1097,9 +1149,25 @@ function buildReport(){
         ${pending.length?`<p style="color:var(--amber-bd)">另有 ${pending.length} 項因子（${pending.map(p=>esc(p.factor)).join('、')}）證據不足、相關性<b>待釐清</b>，已列入驗證計畫優先補齊資料，未以確認根因論述（避免臆測）。</p>`:''}
         <p>所有結論皆可追溯至問卷回答、AI 互動調查與證據來源（見第二、三節）；信心度與證據缺口已逐項標示。存在證據缺口者，須先執行對應驗證項目補齊資料，方可結案。本報告為模擬草稿，須經 QA/RA 審閱確認。</p>
       </div>`;
-    })()}`;
-  STATE.report={generated_at:new Date().toISOString(),html};
+    })()}</div>`;
+  STATE.report={generated_at:new Date().toISOString(),html,conclusion_source:'規則引擎（模擬）'};
   document.getElementById('report-body').innerHTML=html;
+  // 連線模式：以模型改寫結論敘述（保留追溯性聲明），失敗則保留規則版
+  if(AI.online){
+    const cc=document.getElementById('report-conclusion');
+    const payload={
+      device:STATE.device, failure_mode:STATE.device.failureMode,
+      root_causes:[...STATE.rootCauses].sort((a,b)=>b.fmea.rpn-a.fmea.rpn).map(r=>({statement:r.statement,factor:r.factor,rpn:r.fmea.rpn,confidence:r.confidence.score,pending:!!r.pending})),
+      verifications:STATE.verifications.map(v=>({priority:v.priority,statement:v.statement,rpn:v.rpn}))
+    };
+    const llm=await aiCall('report',payload);
+    if(llm&&cc){
+      cc.innerHTML=`<div style="font-size:13px"><p>${esc(llm.trim()).replace(/\n/g,'<br>')}</p>
+        <p style="color:var(--muted)">所有結論皆可追溯至問卷回答、AI 互動調查與證據來源（見第二、三節）；信心度與證據缺口已逐項標示。本報告為草稿，須經 QA/RA 審閱確認。</p></div>`;
+      STATE.report.conclusion_source='AI 模型（連線）';
+      STATE.report.html=document.getElementById('report-body').innerHTML;
+    }
+  }
 }
 
 /* 進入階段時觸發對應渲染 */
@@ -1123,6 +1191,7 @@ function exportJSON(){
 
 /* init */
 buildNav();
+pingAI();   // 偵測後端；連線 → AI 工程推理，否則規則引擎模擬
 </script>
 </body>
 </html>

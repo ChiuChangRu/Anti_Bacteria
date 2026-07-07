@@ -106,6 +106,65 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
+// ── DMAIC3 失效調查系統：AI 推理端點 ──
+// DMAIC3.html 於連線模式呼叫此端點取得工程級推理；離線/失敗時前端自動退回規則引擎模擬。
+// 設計原則：繁體中文、資深醫療器材品質/法規工程觀點、不臆測（資訊不足即說明缺口）。
+const DMAIC_SYSTEM =
+  "你是資深醫療器材品質工程師（ISO 13485 / CAPA / 失效分析 / V&V / 法規），" +
+  "以工程判斷回答，繁體中文、精確、可執行，不寫漂亮空話。" +
+  "嚴禁編造：資訊不足時明確指出證據缺口與待補項目，不得虛構數據、標準條號或結論。" +
+  "所有推論須與提供的問卷、AI 調查發現、證據來源一致。";
+
+app.post("/api/dmaic", async (req, res) => {
+  try {
+    const { task, context } = req.body || {};
+    if (task === "ping") return res.json({ success: true, text: "ok" });
+
+    const ctx = JSON.stringify(context ?? {}, null, 2);
+    let instruction = "";
+    let wantJson = false;
+
+    if (task === "summary") {
+      // 問卷 + AI 互動調查發現 → 問題釐清與收斂摘要
+      instruction =
+        "根據以下器材資訊、問卷回答與 AI 互動調查發現，寫一段 150–220 字的「問題釐清與收斂摘要」：" +
+        "說明問題如何/何時發生、目前收斂到哪些因子方向、以及尚待釐清的證據缺口。" +
+        "不要逐條複述問卷，不要編造未提供的資訊。\n\n資料：\n" + ctx;
+    } else if (task === "rootcause") {
+      // 針對每個根因，補上工程佐證、信心度說明與缺口
+      wantJson = true;
+      instruction =
+        "以下為初步根因清單（含勾選陳述、支持/缺口證據、信心度分數）。" +
+        "請針對每一項補上工程佐證說明。只能引用提供的證據，不得新增未提供的事實。" +
+        '嚴格回傳 JSON 陣列，格式：[{"id":"RCx","rationale":"為何此因子可能為貢獻因（1-2句）","gap":"最關鍵待補證據（1句，若已充分則寫\\"—\\"）"}]。' +
+        "只回傳 JSON，不要其他文字。\n\n資料：\n" + ctx;
+    } else if (task === "report") {
+      // 最終報告的結論與追溯性敘述
+      instruction =
+        "根據以下根因（含 FMEA RPN 與 pending 待釐清標記）、驗證計畫，寫報告「結論」段落（150–220 字）：" +
+        "指出依現有證據最可能之『已確認』貢獻根因（RPN 高者優先，排除 pending 待釐清項目），" +
+        "說明 pending 因子為何僅列為待釐清而非確認根因（避免臆測），" +
+        "並敘明結案前須先完成哪些高優先驗證以補齊證據缺口。不得編造。\n\n資料：\n" + ctx;
+    } else {
+      return res.status(400).json({ success: false, error: "unknown task" });
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: instruction,
+      config: {
+        systemInstruction: DMAIC_SYSTEM,
+        temperature: 0.3,
+        ...(wantJson ? { responseMimeType: "application/json" } : {}),
+      },
+    });
+    res.json({ success: true, text: response.text });
+  } catch (error: any) {
+    console.error("DMAIC3 AI Error:", error);
+    res.status(500).json({ success: false, error: error.message || "AI error" });
+  }
+});
+
 // Vite server connection (development or production static server)
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
