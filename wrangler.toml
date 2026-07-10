@@ -1,0 +1,15 @@
+# Cloudflare Worker 設定 — DMAIC3 /api/dmaic 後端(Claude Fable 5)
+# 部署:
+#   npm i -g wrangler
+#   wrangler secret put ANTHROPIC_API_KEY   # 貼上 Anthropic API 金鑰
+#   wrangler deploy
+#
+# 綁定路由(擇一):
+#   A. 與前端同網域:設 route "example.com/api/dmaic*",前端 AI.base='/api/dmaic' 免改、免 CORS。
+#   B. 獨立 workers.dev 網域:將 DMAIC3.html 的 AI.base 改為本 Worker URL(已內建 CORS)。
+name = "dmaic3-api"
+main = "dmaic-worker.ts"
+compatibility_date = "2026-07-08"
+
+# 範例(A):同網域路由 — 取消註解並改成你的網域/zone
+# routes = [{ pattern = "your-domain.com/api/dmaic*", zone_name = "your-domain.com" }]
